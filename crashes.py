@@ -435,7 +435,7 @@ def processRedashDataset(dbFilename, jsonUrl, queryId, userKey, cacheValue, para
   print('%04d total reports loaded.' % crashesToProcess)
 
   for recrow in dataset["query_result"]["data"]["rows"]:
-    if totals['processed'] >= crashProcessMax:
+    if totals['processed'] >= crashesToProcess:
       break
 
     # pull some redash props out of the recrow. You can add these
@@ -444,43 +444,31 @@ def processRedashDataset(dbFilename, jsonUrl, queryId, userKey, cacheValue, para
     operatingSystemVer = recrow['normalized_os_version']
     firefoxVer = recrow['display_version']
     buildId = recrow['build_id']
-    compositor = recrow['compositor']
+    #compositor = recrow['compositor']
     arch = recrow['arch']
     oomSize = recrow['oom_size']
-    devVendor = recrow['vendor']
-    devGen = recrow['gen']
-    devChipset = recrow['chipset']
-    devDevice = recrow['device']
-    drvVer = recrow['driver_version']
-    drvDate = recrow['driver_date']
+    #devVendor = recrow['vendor']
+    #devGen = recrow['gen']
+    #devChipset = recrow['chipset']
+    #devDevice = recrow['device']
+    #drvVer = recrow['driver_version']
+    #drvDate = recrow['driver_date']
     clientId = recrow['client_id']
-    devDesc = recrow['device_description']
+    #devDesc = recrow['device_description']
 
-    # Load the json crash payload from recrow
-    props = json.loads(recrow["payload"])
+    # Load the json stack traces from recrow
+    stackTraces = json.loads(recrow["stack_traces"])
 
-    # touch up for the crash symbolication package
-    props['stackTraces'] = props['stack_traces']
-
-    crashId = props['crash_id']
-    crashDate = props['crash_date']
-    minidumpHash = props['minidump_sha256_hash']
-    crashReason = props['metadata']['moz_crash_reason']
-    crashInfo = props['stack_traces']['crash_info']
+    # crashId = props['crash_id']
+    crashDate = str(datetime.fromisoformat(recrow['crash_time']).date())
+    minidumpHash = recrow['minidump_sha256_hash']
+    crashReason = recrow['moz_crash_reason']
+    ipcChannelError = recrow['ipc_channel_error']
+    crashId = recrow['document_id']
 
     startupCrash = False
     if recrow['startup_crash']:
       startupCrash = int(recrow['startup_crash'])
-
-    fissionEnabled = False
-    if recrow['fission_enabled']:
-      fissionEnabled = int(recrow['fission_enabled'])
-
-    lockdownEnabled = False
-    if recrow['lockdown_enabled']:
-      lockdownVal = int(recrow['lockdown_enabled'])
-      if lockdownVal == 1:
-        lockdownEnabled = True
 
     if crashReason != None:
       crashReason = crashReason.strip('\n')
@@ -503,8 +491,6 @@ def processRedashDataset(dbFilename, jsonUrl, queryId, userKey, cacheValue, para
           # if you add a new value to the sql queries, you can update
           # the local json cache we have in memory here. Saves having
           # to delete the file and symbolicate everything again.
-          #report['fission'] = fissionEnabled
-          #report['lockdown'] = lockdownEnabled
           break
 
     if found:
@@ -512,9 +498,35 @@ def processRedashDataset(dbFilename, jsonUrl, queryId, userKey, cacheValue, para
       totals['alreadyProcessed'] += 1
       progress(totals['processed'], crashesToProcess)
       continue
-  
+
+    def base_addr_fixup(m):
+      return m
+
+    # Fixup stackTraces fields to what is expected
+    if "modules" in stackTraces:
+      for m in stackTraces["modules"]:
+        m["base_addr"] = m["base_address"]
+
+    if not all(ind in stackTraces for ind in ["crash_thread", "crash_type", "modules", "threads"]):
+      continue
+
     # symbolicate and return payload result
-    payload = symbolicate({ "normalized_os": operatingSystem, "payload": props })
+    payload = symbolicate({ "normalized_os": operatingSystem, "payload": {
+      "metadata": {
+        # TODO async_shutdown_timeout
+        "ipc_channel_error": ipcChannelError,
+        "oom_allocation_size": oomSize,
+        "moz_crash_reason": crashReason,
+      },
+      "stack_traces": {
+        "crash_info": {
+          "crashing_thread": stackTraces["crash_thread"],
+          "type": stackTraces["crash_type"],
+        },
+        "modules": stackTraces["modules"],
+        "threads": stackTraces["threads"]
+      }
+    }})
     signature = generateSignature(payload)
 
     if skipProcessSignature(signature):
@@ -573,22 +585,12 @@ def processRedashDataset(dbFilename, jsonUrl, queryId, userKey, cacheValue, para
       'clientid':           clientId,
       'crashid':            crashId,
       'crashdate':          crashDate,
-      'compositor':         compositor,
       'stack':              stack,
       'oomsize':            oomSize,
-      'type':               crashInfo['type'],
-      'devvendor':          devVendor,
-      'devgen':             devGen,
-      'devchipset':         devChipset,
-      'devdevice':          devDevice,
-      'devdescription':     devDesc,
-      'driverversion' :     drvVer,
-      'driverdate':         drvDate,
+      'type':               stackTraces['crash_type'],
       'minidumphash':       minidumpHash,
       'crashreason':        crashReason,
       'startup':            startupCrash,
-      'fission':            fissionEnabled,
-      'lockdown':           lockdownEnabled,
       # Duplicated but useful if we decide to change the hashing algo
       # and need to reprocess reports.
       'operatingsystem':    operatingSystem,
@@ -607,6 +609,19 @@ def processRedashDataset(dbFilename, jsonUrl, queryId, userKey, cacheValue, para
       }
 
     # check to see if stats has a date entry that matches crashDate
+
+    #stats[hash]['crashdata'].setdefault(
+    #    crashDate, { 'crashids': [], 'clientids':[] }
+    #  ).setdefault(
+    #    operatingSystem, {}
+    #  ).setdefault(
+    #    operatingSystemVer, {}
+    #  ).setdefault(
+    #    arch, {}
+    #  ).setdefault(
+    #    firefoxVer, { 'clientcount': 0, 'crashcount': 0 }
+    #  )
+
     if crashDate not in stats[hash]['crashdata']:
       stats[hash]['crashdata'][crashDate] = { 'crashids': [], 'clientids':[] }
 
@@ -1352,27 +1367,10 @@ def generateTopCrashReport(reports, stats, totalCrashesProcessed, parameters, ip
                                                               module=moduleName,
                                                               style=linkStyle)
 
-      compositor = report['compositor']
-      if compositor == 'webrender_software_d3d11':
-        compositor = 'd3d11'
-      elif compositor == 'webrender':
-        compositor = 'webrender'
-      elif compositor == 'webrender_software':
-        compositor = 'swiggle'
-      elif compositor == 'none':
-        compositor = ''
-
       reportHtml += Template(outerStackTemplate).substitute(expandostack=('st'+str(signatureIndex)+'-'+str(idx)),
                                                             rindex=idx,
                                                             type=crashType,
                                                             oomsize=oombytes,
-                                                            devvendor=report['devvendor'],
-                                                            devgen=report['devgen'],
-                                                            devchipset=report['devchipset'],
-                                                            description=report['devdescription'],
-                                                            drvver=report['driverversion'],
-                                                            drvdate=report['driverdate'],
-                                                            compositor=compositor,
                                                             reason=crashReason,
                                                             infolink=infoLink,
                                                             startupiconclass=startupStyle,
