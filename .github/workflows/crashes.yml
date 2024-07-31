@@ -2,7 +2,7 @@ name: Update crashes informations from Glean Telemetry
 
 on:
   schedule:
-    - cron: '0 3 * * *'
+    - cron: '0 8 * * *'
   push:
     branches: ["main"]
 
