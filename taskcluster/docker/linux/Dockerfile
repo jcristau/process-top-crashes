@@ -11,8 +11,11 @@ RUN mkdir -p /builds && \
 RUN apk update
 
 # Setup Python
+# %include requirements.txt
+ADD topsrcdir/requirements.txt /requirements.txt
 RUN apk add --no-cache python3 py3-pip && \
-    python3 -m pip install --no-cache --upgrade --break-system-packages pip setuptools
+    python3 -m pip install --no-cache --upgrade --break-system-packages pip setuptools && \
+    python3 -m pip install --no-cache --break-system-packages -r /requirements.txt
 
 # Setup other dependencies
 RUN apk add bash git coreutils
